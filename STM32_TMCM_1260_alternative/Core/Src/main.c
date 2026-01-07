@@ -85,11 +85,17 @@
 // Enable driver (active low)
 static inline void TMC5160_Enable(void) {
     HAL_GPIO_WritePin(DRV_ENN_GPIO_Port, DRV_ENN_Pin, GPIO_PIN_RESET);
+    // Keep as output low
 }
 
-// Disable driver (active low)
+// Disable driver (let external pull-up do the work), so there is no 5V -> 3V3 feeding
 static inline void TMC5160_Disable(void) {
-    HAL_GPIO_WritePin(DRV_ENN_GPIO_Port, DRV_ENN_Pin, GPIO_PIN_SET);
+	// Make PA2 input, high-Z
+	    GPIO_InitTypeDef GPIO_InitStruct = {0};
+	    GPIO_InitStruct.Pin = DRV_ENN_Pin;
+	    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	    GPIO_InitStruct.Pull = GPIO_NOPULL; // let external pull-up pull it high
+	    HAL_GPIO_Init(DRV_ENN_GPIO_Port, &GPIO_InitStruct);
 }
 
 
