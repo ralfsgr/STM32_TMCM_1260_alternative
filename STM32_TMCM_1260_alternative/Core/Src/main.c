@@ -37,6 +37,8 @@
 // Chip Select pin
 #define TMC5160_CS_GPIO_Port GPIOA
 #define TMC5160_CS_Pin GPIO_PIN_4
+#define DRV_ENN_GPIO_Port GPIOA
+#define DRV_ENN_Pin GPIO_PIN_2
 
 #define IHOLD_IRUN_VALUE 0x61905
 // IHOLD bits 4...0 (5 = 0101; 0x05); IRUN bits 12...8 (25 = 11001; 0x19 << 8 -> 0x1900); IHOLDDELAY bits 19...16 (6 = 0110; 0x06 << 16 -> 0x60000);
@@ -78,6 +80,19 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+
+
+// Enable driver (active low)
+static inline void TMC5160_Enable(void) {
+    HAL_GPIO_WritePin(DRV_ENN_GPIO_Port, DRV_ENN_Pin, GPIO_PIN_RESET);
+}
+
+// Disable driver (active low)
+static inline void TMC5160_Disable(void) {
+    HAL_GPIO_WritePin(DRV_ENN_GPIO_Port, DRV_ENN_Pin, GPIO_PIN_SET);
+}
+
+
 
 /* USER CODE END PM */
 
@@ -189,7 +204,20 @@ int main(void)
 
   TMC5160_CS_HIGH();
   HAL_Delay(10);
+
+  // Driver disabled by default (external pull-up)
+  TMC5160_Disable();
+  HAL_Delay(10); // let things stabilize
+
+
   TMC5160_Init();
+
+  // Enable driver after configuration
+  TMC5160_Enable();
+  HAL_Delay(10); // small delay to let driver enable
+  // Never enable DRV_ENN before configuring registers — can cause motor to jerk with undefined current/microstep.
+  // Driver can be disabled any time if you need to stop the motor immediately — the motor will coast.
+
 
   // Move 10 revolutions
   TMC5160_WriteReg(XTARGET, 2000);
@@ -308,10 +336,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2|GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  /*Configure GPIO pins : PA2 PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
