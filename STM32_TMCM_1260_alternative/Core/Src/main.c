@@ -40,15 +40,17 @@
 #define DRV_ENN_GPIO_Port GPIOA
 #define DRV_ENN_Pin GPIO_PIN_2
 
-#define IHOLD_IRUN_VALUE 0x61905
-// IHOLD bits 4...0 (5 = 0101; 0x05); IRUN bits 12...8 (25 = 11001; 0x19 << 8 -> 0x1900); IHOLDDELAY bits 19...16 (6 = 0110; 0x06 << 16 -> 0x60000);
-// total set bits in 0x10 register: 0x05 + 0x1900 + 0x60000 = 0x61905 = 0110 0001 1001 0000 0101;
+#define IHOLD_IRUN_VALUE 0x61005
+// IHOLD bits 4...0 (5 = 0101 -> 0x05); IRUN bits 12...8 (16 = 0001 0000; 0x10 << 8 -> 0x1000); IHOLDDELAY bits 19...16 (6 = 0110; 0x06 << 16 -> 0x60000);
+// total set bits in 0x10 register: 0x05 + 0x1000 + 0x60000 = 0x61005 = 0110 0001 0000 0000 0101;
 // so hex packed of 19 bits are set from LSB side for IHOLD_IRUN (0x10) register;
+// with IRUN bits 16 current should be around 2.322 amps w 0.075 sense resistor
 
 
 // TMC5160 register addresses
 #define GCONF       0x00
 #define IHOLD_IRUN  0x10
+#define RAMPMODE	0x20
 #define CHOPCONF    0x6C
 #define VSTART      0x23
 #define Amax        0x26
@@ -56,6 +58,14 @@
 #define VMAX        0x27
 #define XTARGET     0x2D
 
+#define D1			0x2A
+#define VSTOP		0x2B
+
+
+
+// TMC5160 register addresses not used now, but could be useful in future
+#define X_COMPARE       0x05
+#define DRV_CONF       0x0A // 21..20 FILT_ISENSE: Increase setting if motor chopper noise occurs due to cross-coupling of both coils
 
 
 // Example values for 0X6C: CHOPCONF – CHOPPER CONFIGURATION
@@ -191,11 +201,20 @@ uint32_t TMC5160_ReadReg(uint8_t address) {
 
 void TMC5160_Init(void) {
     TMC5160_WriteReg(GCONF, 0x00000008); // 0x00000008 -> 0x00, 0x00, 0x00, 0x08 -> 4 bytes -> 32 bits -> 0000 0000 0000 0000 0000 0000 0000 1000
+
+    uint32_t val = TMC5160_ReadReg(GCONF); // check if all bits where set correctly for debugging mode
+
     TMC5160_WriteReg(IHOLD_IRUN, IHOLD_IRUN_VALUE);
     TMC5160_WriteReg(CHOPCONF, CHOPCONF_VALUE);
-    TMC5160_WriteReg(VSTART, 0x00000000);
+
+    // Set motion mode to positioning
+    TMC5160_WriteReg(RAMPMODE, 0); // Motor moves according to position commands (XTARGET) using all motion parameters
+    // Set max velocity, acceleration, deceleration
+    TMC5160_WriteReg(VSTART, 0x00000000); // VSTART = 0 → motor starts from zero velocity (usually fine).
     TMC5160_WriteReg(Amax, 500);
     TMC5160_WriteReg(Dmax, 500);
+    TMC5160_WriteReg(D1, 1); // minimal safe deceleration stop velocity
+    TMC5160_WriteReg(VSTOP, 10);
     TMC5160_WriteReg(VMAX, 50000);
     // 500 and 50000 are integer literals; In C, integer literals default to type int; The compiler automatically converts int → uint32_t
     // TMC5160_WriteReg(Amax, 500); -> uint32_t value = 500; -> 500 = 0x000001F4 -> tx[1] = 0x00, tx[2] = 0x00, tx[3] = 0x01, tx[4] = 0xF4
