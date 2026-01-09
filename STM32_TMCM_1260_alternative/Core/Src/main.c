@@ -42,7 +42,7 @@
 
 #define IHOLD_IRUN_VALUE 0x61905
 // IHOLD bits 4...0 (5 = 0101; 0x05); IRUN bits 12...8 (25 = 11001; 0x19 << 8 -> 0x1900); IHOLDDELAY bits 19...16 (6 = 0110; 0x06 << 16 -> 0x60000);
-// total set bits in 0x10 register: 0x05 + 0x1900 + 0x60000 = 0x61905
+// total set bits in 0x10 register: 0x05 + 0x1900 + 0x60000 = 0x61905 = 0110 0001 1001 0000 0101;
 // so hex packed of 19 bits are set from LSB side for IHOLD_IRUN (0x10) register;
 
 
@@ -67,6 +67,8 @@
 #define CHOPCONF_INTPOL  0   // interpolation disabled
 
 // Compose CHOPCONF
+// This creates one 32-bit number that matches the bit positions defined in the TMC5160 datasheet.
+// You have ONE 32-bit value
 #define CHOPCONF_VALUE  ( ((CHOPCONF_TOFF  & 0xF) << 0)  \
                         | ((CHOPCONF_HSTRT & 0x7) << 4)  \
                         | ((CHOPCONF_HEND  & 0xF) << 7)  \
@@ -124,18 +126,27 @@ static inline void TMC5160_CS_HIGH(void) {
     HAL_GPIO_WritePin(TMC5160_CS_GPIO_Port, TMC5160_CS_Pin, GPIO_PIN_SET);
 }
 
+
 uint32_t TMC5160_WriteReg(uint8_t address, uint32_t value) {
     uint8_t tx[5], rx[5];
     uint32_t ret;
 
-    tx[0] = address & 0x7F; // MSB=0 for write
-    tx[1] = (value >> 24) & 0xFF;
-    tx[2] = (value >> 16) & 0xFF;
-    tx[3] = (value >> 8) & 0xFF;
-    tx[4] = value & 0xFF;
+    // This is NOT re-positioning register fields. This is simply breaking a 32-bit integer into 4 bytes so SPI can send them. SPI sends 8 bits at a time.
+    // Your MCU cannot send a 32-bit word directly.
+    // So this converts: uint32_t value = 0xAABBCCDD; into: tx[1] = 0xAA; tx[2] = 0xBB; tx[3] = 0xCC; tx[4] = 0xDD
+    tx[0] = address | 0x80; // MSB = 1 → WRITE // MSB=0 for write // 8 bits // address + R/W
+    tx[1] = (value >> 24) & 0xFF; // 8 bits // data[31:24] // How do we extract bits 31..24? // We move them into the lowest 8-bit position, then mask.
+    // This is called byte extraction, not bit manipulation.
+    // and shifting is how you extract the correct byte (MSB first) from a 32-bit register value
+    // by shifting to the right you get your needed 8 bits in tx byte value;
+
+    tx[2] = (value >> 16) & 0xFF; // 8 bits // data[23:16]
+    tx[3] = (value >> 8) & 0xFF; // 8 bits // data[15:8]
+    tx[4] = value & 0xFF; // 8 bits // data[7:0] // LSB last out
 
     TMC5160_CS_LOW();
-    HAL_SPI_TransmitReceive(&hspi1, tx, rx, 5, HAL_MAX_DELAY);
+    HAL_SPI_TransmitReceive(&hspi1, tx, rx, 5, HAL_MAX_DELAY); // sends out from tx[0] to tx [4] (LSB transmitted last as per datasheet)
+    // and also receives back same tx data as response or ACK that data was received correctly and stored in rx[5]
     TMC5160_CS_HIGH();
 
     ret = ((uint32_t)rx[1] << 24) | ((uint32_t)rx[2] << 16) | ((uint32_t)rx[3] << 8) | rx[4];
@@ -146,25 +157,52 @@ uint32_t TMC5160_ReadReg(uint8_t address) {
     uint8_t tx[5], rx[5];
     uint32_t ret;
 
-    tx[0] = 0x80 | (address & 0x7F); // MSB=1 for read
+	// When you send a read command, the response from the device comes on the next SPI transfer, not immediately.
+    // You pull CS low and send 5 bytes with tx[0] = 0b0AAAAAAA.
+    // The chip latches the read address and prepares the data.
+    // The first SPI transfer (tx[0..4]) does not return the actual register value — it returns either: old/undefined data from the previous transaction
+    // The real register value is returned on the next SPI transfer.
+    // That’s why TMC datasheets always show “read requires two transfers”.
+    // You need two consecutive SPI transfers: 1. Send read request (address byte, rest 0); 2. Read the data on the next SPI transfer;
+
+
+    // --- First transfer: send read command --- so the chip prepares the data
+    tx[0] = address & 0x7F;  // MSB = 0 → READ;
     tx[1] = tx[2] = tx[3] = tx[4] = 0;
+    // read access does not transfer data to the addressed register, but it transfers the address only and its 32 data bits are dummies, and, further the
+    // following read or write access delivers back the data read from the address transmitted in the preceding read cycle.
+    // For read access, the data bits might have any value (-). So, one can set them to 0.
 
     TMC5160_CS_LOW();
     HAL_SPI_TransmitReceive(&hspi1, tx, rx, 5, HAL_MAX_DELAY);
     TMC5160_CS_HIGH();
+
+    // --- Second transfer: clock out the data --- send the same read command again to get data out from chip
+        tx[0] = 0;  // dummy bytes // no need to input address bc the data now will be given from first transfer
+        tx[1] = tx[2] = tx[3] = tx[4] = 0; // dummy data bits
+
+        TMC5160_CS_LOW();
+        HAL_SPI_TransmitReceive(&hspi1, tx, rx, 5, HAL_MAX_DELAY);
+        TMC5160_CS_HIGH();
 
     ret = ((uint32_t)rx[1] << 24) | ((uint32_t)rx[2] << 16) | ((uint32_t)rx[3] << 8) | rx[4];
     return ret;
 }
 
 void TMC5160_Init(void) {
-    TMC5160_WriteReg(GCONF, 0x00000000);
+    TMC5160_WriteReg(GCONF, 0x00000008); // 0x00000008 -> 0x00, 0x00, 0x00, 0x08 -> 4 bytes -> 32 bits -> 0000 0000 0000 0000 0000 0000 0000 1000
     TMC5160_WriteReg(IHOLD_IRUN, IHOLD_IRUN_VALUE);
     TMC5160_WriteReg(CHOPCONF, CHOPCONF_VALUE);
     TMC5160_WriteReg(VSTART, 0x00000000);
     TMC5160_WriteReg(Amax, 500);
     TMC5160_WriteReg(Dmax, 500);
     TMC5160_WriteReg(VMAX, 50000);
+    // 500 and 50000 are integer literals; In C, integer literals default to type int; The compiler automatically converts int → uint32_t
+    // TMC5160_WriteReg(Amax, 500); -> uint32_t value = 500; -> 500 = 0x000001F4 -> tx[1] = 0x00, tx[2] = 0x00, tx[3] = 0x01, tx[4] = 0xF4
+    // 500 = 0x000001F4 -> int32 (32 bits or 4 bytes), in hex two numbers represent 8 bits (1 byte)
+    // 500 = 0x000001F4 = 0000'0000 0000'0000 0000'0001 1111'0100
+    // so 0x000001F4 -> 00 00 01 F4
+    // Each register is accessed via 32 data bits even if it uses less than 32 data bits. (from datasheet)
 }
 
 
