@@ -58,6 +58,8 @@
 #define VMAX        0x27
 #define XTARGET     0x2D
 
+
+// just to be sure the default settings are set
 #define D1			0x2A
 #define VSTOP		0x2B
 
