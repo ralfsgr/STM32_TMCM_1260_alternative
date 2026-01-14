@@ -57,6 +57,7 @@
 #define Dmax        0x28
 #define VMAX        0x27
 #define XTARGET     0x2D
+#define GSTAT		0x01
 
 
 // just to be sure the default settings are set
@@ -66,7 +67,7 @@
 
 
 // TMC5160 register addresses not used now, but could be useful in future
-#define X_COMPARE       0x05
+#define X_COMPARE      0x05
 #define DRV_CONF       0x0A // 21..20 FILT_ISENSE: Increase setting if motor chopper noise occurs due to cross-coupling of both coils
 
 
@@ -75,7 +76,13 @@
 #define CHOPCONF_HSTRT   4   // hysteresis start
 #define CHOPCONF_HEND    1   // hysteresis end
 #define CHOPCONF_TBL     2   // blank time
-#define CHOPCONF_MRES    8   // full step (MRES = 0b1000)
+#define CHOPCONF_MRES    0b0000   // full step (MRES = 0b1000); 0b0000 - 256 microstepping;
+// XTARGET = 2000 → exactly 10 full steps × 200 steps/rev; if full step than one rotation is 200 sets x 10 revolutions = 2000 steps;
+// 5 rev x 256 microsteps x 200 steps/rev = 256,000
+// Lower microsteps (like 4 μsteps) are only useful if you want very small steps in SPI mode, but you must scale XTARGET, VMAX, Amax accordingly.
+// Pick MRES = 0b0000 (native 256 μsteps) for smoothest motion
+// Or pick 0b1000 = full step if you want exactly 1 step per “full step” in XTARGET units
+
 #define CHOPCONF_INTPOL  0   // interpolation disabled
 
 // Compose CHOPCONF
@@ -88,6 +95,29 @@
                         | ((CHOPCONF_MRES  & 0xF) << 24) \
                         | ((CHOPCONF_INTPOL & 0x1) << 28) )
 
+// \ - it tells preprocessor that this macro definition continues on the next line;
+// is actually one single expression when the compiler sees it;
+// | = bitwise OR; Combines bits from multiple values into a single 32-bit number
+// & mask → limit field to allowed bits
+// << shift → move the field to its correct bit position
+
+// (CHOPCONF_TOFF & 0xF) << 0 → 0b00000011
+// (CHOPCONF_HSTRT & 0x7) << 4 → 0b0100000  (4 << 4 = 64)
+// Bitwise OR:
+// 0b00000011 | 0b0100000 → 0b0100011 // Combines bits into their proper positions in the 32-bit register value
+
+// Masking with &:
+// CHOPCONF_TOFF & 0xF; Ensures only the lowest 4 bits of TOFF are used; Prevents accidental overflow if someone sets TOFF = 20 (0b10100) → keeps it at 0b0100
+// for examle CHOPCONF_INTPOL is 1 bit value in that register bit 28, so you mask only 1 bit in that 4 it hex number 0x? (4 bits)
+// If a field is 5 bits wide, the mask would be 0x1F in hexadecimal.
+// if width would be 5 bits? with 0b10010 value: Valid values: 0 … 0b11111 (decimal 0 … 31), Your value: 0b10010 = decimal 18; fits in 5 bits;
+// Mask = 5 ones in binary = 0b11111 = 0x1F; To safely keep only the lowest 5 bits: masked_value = value & 0x1F;
+// Masking ensures only allowed bits go into the register, even if user accidentally sets a larger value.
+
+
+// How the full CHOPCONF_VALUE is built
+// 1. Take each field (TOFF, HSTRT, HEND, TBL, MRES, INTPOL); 2. Mask it to the correct number of bits (& 0xF, & 0x7, & 0x3, etc.);
+// 3. Shift it into its bit position in the 32-bit CHOPCONF register (<< 0, << 4, << 7, …); 4. Combine all fields using bitwise OR (|) → single 32-bit value
 
 
 /* USER CODE END PD */
@@ -96,11 +126,6 @@
 /* USER CODE BEGIN PM */
 
 
-// Enable driver (active low)
-static inline void TMC5160_Enable(void) {
-    HAL_GPIO_WritePin(DRV_ENN_GPIO_Port, DRV_ENN_Pin, GPIO_PIN_RESET);
-    // Keep as output low
-}
 
 // Disable driver (let external pull-up do the work), so there is no 5V -> 3V3 feeding
 static inline void TMC5160_Disable(void) {
@@ -110,6 +135,21 @@ static inline void TMC5160_Disable(void) {
 	    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
 	    GPIO_InitStruct.Pull = GPIO_NOPULL; // let external pull-up pull it high
 	    HAL_GPIO_Init(DRV_ENN_GPIO_Port, &GPIO_InitStruct);
+}
+
+
+// Enable driver (active low)
+static inline void TMC5160_Enable(void) {
+	// you have to init again as output because in disable function it was made as high z input pin
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = DRV_ENN_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(DRV_ENN_GPIO_Port, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(DRV_ENN_GPIO_Port, DRV_ENN_Pin, GPIO_PIN_RESET);
+    // Keep as output low
 }
 
 
@@ -139,9 +179,9 @@ static inline void TMC5160_CS_HIGH(void) {
 }
 
 
-uint32_t TMC5160_WriteReg(uint8_t address, uint32_t value) {
-    uint8_t tx[5], rx[5];
-    uint32_t ret;
+void TMC5160_WriteReg(uint8_t address, uint32_t value) {
+    uint8_t tx[5];
+
 
     // This is NOT re-positioning register fields. This is simply breaking a 32-bit integer into 4 bytes so SPI can send them. SPI sends 8 bits at a time.
     // Your MCU cannot send a 32-bit word directly.
@@ -157,12 +197,8 @@ uint32_t TMC5160_WriteReg(uint8_t address, uint32_t value) {
     tx[4] = value & 0xFF; // 8 bits // data[7:0] // LSB last out
 
     TMC5160_CS_LOW();
-    HAL_SPI_TransmitReceive(&hspi1, tx, rx, 5, HAL_MAX_DELAY); // sends out from tx[0] to tx [4] (LSB transmitted last as per datasheet)
-    // and also receives back same tx data as response or ACK that data was received correctly and stored in rx[5]
+    HAL_SPI_Transmit(&hspi1, tx, 5, HAL_MAX_DELAY); // sends out from tx[0] to tx [4] (LSB transmitted last as per datasheet)
     TMC5160_CS_HIGH();
-
-    ret = ((uint32_t)rx[1] << 24) | ((uint32_t)rx[2] << 16) | ((uint32_t)rx[3] << 8) | rx[4];
-    return ret;
 }
 
 uint32_t TMC5160_ReadReg(uint8_t address) {
@@ -202,22 +238,37 @@ uint32_t TMC5160_ReadReg(uint8_t address) {
 }
 
 void TMC5160_Init(void) {
-    TMC5160_WriteReg(GCONF, 0x00000008); // 0x00000008 -> 0x00, 0x00, 0x00, 0x08 -> 4 bytes -> 32 bits -> 0000 0000 0000 0000 0000 0000 0000 1000
+    //TMC5160_WriteReg(GCONF, 0x00000008); // 0x00000008 -> 0x00, 0x00, 0x00, 0x08 -> 4 bytes -> 32 bits -> 0000 0000 0000 0000 0000 0000 0000 1000
 
-    uint32_t val = TMC5160_ReadReg(GCONF); // check if all bits where set correctly for debugging mode
+    //uint32_t val = TMC5160_ReadReg(GCONF); // check if all bits where set correctly for debugging mode
 
     TMC5160_WriteReg(IHOLD_IRUN, IHOLD_IRUN_VALUE);
+
+    uint32_t stat = TMC5160_ReadReg(GSTAT);
+    if (stat & 0b111) { // keeps only bits 0, 1, 2, clears the rest to 0;
+    	// if one of those 3 bits in stat is set to one then condition is met;
+        // some error occurred (reset, SPI error, driver ready)
+    	uint32_t val4 = 1; // for debugging mode
+    }
+
     TMC5160_WriteReg(CHOPCONF, CHOPCONF_VALUE);
+
+    uint32_t val3 = TMC5160_ReadReg(CHOPCONF);
+    if (val3 != CHOPCONF_VALUE) {
+        // write failed, handle error
+    	uint32_t val5 = 1; // for debugging mode
+    }
+
 
     // Set motion mode to positioning
     TMC5160_WriteReg(RAMPMODE, 0); // Motor moves according to position commands (XTARGET) using all motion parameters
     // Set max velocity, acceleration, deceleration
     TMC5160_WriteReg(VSTART, 0x00000000); // VSTART = 0 → motor starts from zero velocity (usually fine).
-    TMC5160_WriteReg(Amax, 500);
-    TMC5160_WriteReg(Dmax, 500);
+    TMC5160_WriteReg(Amax, 50000);
+    TMC5160_WriteReg(Dmax, 50000);
     TMC5160_WriteReg(D1, 1); // minimal safe deceleration stop velocity
     TMC5160_WriteReg(VSTOP, 10);
-    TMC5160_WriteReg(VMAX, 50000);
+    TMC5160_WriteReg(VMAX, 200000);
     // 500 and 50000 are integer literals; In C, integer literals default to type int; The compiler automatically converts int → uint32_t
     // TMC5160_WriteReg(Amax, 500); -> uint32_t value = 500; -> 500 = 0x000001F4 -> tx[1] = 0x00, tx[2] = 0x00, tx[3] = 0x01, tx[4] = 0xF4
     // 500 = 0x000001F4 -> int32 (32 bits or 4 bytes), in hex two numbers represent 8 bits (1 byte)
@@ -279,13 +330,13 @@ int main(void)
 
   // Enable driver after configuration
   TMC5160_Enable();
-  HAL_Delay(10); // small delay to let driver enable
+  HAL_Delay(30); // small delay to let driver enable
   // Never enable DRV_ENN before configuring registers — can cause motor to jerk with undefined current/microstep.
   // Driver can be disabled any time if you need to stop the motor immediately — the motor will coast.
 
 
-  // Move 10 revolutions
-  TMC5160_WriteReg(XTARGET, 2000);
+  // Move 5 revolutions
+  TMC5160_WriteReg(XTARGET, 20256000);
 
   /* USER CODE END 2 */
 
@@ -295,7 +346,8 @@ int main(void)
   {
 	  // Wait while motor reaches target
 	  uint32_t xactual = TMC5160_ReadReg(0x21); // XACTUAL
-	  if (xactual >= 2000) { // in full steps, so 10 revolutions × 200 steps/rev = 2000 steps
+	  if (xactual >= 20256000) { // in full steps, so 10 revolutions × 200 steps/rev = 2000 steps
+		  uint32_t val1 = 1; // for debugging mode
 		  break;
 	  }
 	  HAL_Delay(10);
@@ -306,6 +358,8 @@ int main(void)
   }
 
   // Motor reached position
+  TMC5160_WriteReg(0x21, 0);  // Reset position XACTUAL
+  TMC5160_Disable();
   while (1);
 
   /* USER CODE END 3 */
@@ -369,7 +423,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_HIGH;
   hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
